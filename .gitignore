@@ -1,0 +1,24 @@
+# Environment variables (contains API tokens)
+.env
+
+# Python caching
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Temporary storage for images
+temp_images/
+
+# System / IDE files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
