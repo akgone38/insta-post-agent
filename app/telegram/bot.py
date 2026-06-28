@@ -17,7 +17,7 @@ def create_telegram_app() -> Application:
     Handlers are registered here but the actual processing functions
     are imported from handlers.py to keep concerns separated.
     """
-    from app.telegram.handlers import handle_photo, handle_start, handle_help
+    from app.telegram.handlers import handle_media, handle_start, handle_help
 
     app = (
         Application.builder()
@@ -29,10 +29,10 @@ def create_telegram_app() -> Application:
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("help", handle_help))
 
-    # Photo handler — this is the core functionality
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    # Media handler (Photos and Videos/Reels)
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media))
 
-    # Catch-all for non-photo messages
+    # Catch-all for non-media messages
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         _handle_text_only,
@@ -43,10 +43,10 @@ def create_telegram_app() -> Application:
 
 
 async def _handle_text_only(update, context):
-    """Reply when user sends text without a photo."""
+    """Reply when user sends text without a photo or video."""
     await update.message.reply_text(
-        "📸 Please send me a **photo** to post on Instagram!\n\n"
-        "You can also add a caption with the photo to give me context "
+        "📸 Please send me a **photo** or **video** to post on Instagram & Facebook!\n\n"
+        "You can also add a caption with the media to give me context "
         "about what the post should say.",
         parse_mode="Markdown",
     )

@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from telegram import Update
@@ -113,20 +113,21 @@ async def health_check():
 
 
 @app.post("/webhook/telegram")
-async def telegram_webhook(request: Request):
+async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     Receive incoming updates from Telegram.
 
     This endpoint is called by Telegram whenever the bot receives a message.
+    We process it in the background to return 200 OK immediately and avoid duplicate retries.
     """
     try:
         data = await request.json()
         logger.info("Received Telegram update")
         logger.debug("Update data: %s", data)
 
-        # Parse and process the update
+        # Parse and process the update in the background
         update = Update.de_json(data=data, bot=telegram_app.bot)
-        await telegram_app.process_update(update)
+        background_tasks.add_task(telegram_app.process_update, update)
 
         return JSONResponse(content={"ok": True})
 

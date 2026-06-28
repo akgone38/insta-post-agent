@@ -12,6 +12,8 @@ class Settings(BaseSettings):
 
     # Hugging Face
     huggingface_api_token: str
+    huggingface_api_base: str = "https://router.huggingface.co/v1"
+    huggingface_vision_models: str = "Qwen/Qwen3-VL-8B-Instruct,CohereLabs/aya-vision-32b"
 
     # Instagram Graph API
     instagram_account_id: str
@@ -43,6 +45,11 @@ class Settings(BaseSettings):
     def image_serve_base_url(self) -> str:
         """Base URL for serving uploaded images publicly."""
         return f"{self.webhook_base_url}/images"
+
+    @property
+    def vision_models_list(self) -> list[str]:
+        """Convert comma-separated model names into a list."""
+        return [m.strip() for m in self.huggingface_vision_models.split(",") if m.strip()]
 
 
 # Singleton

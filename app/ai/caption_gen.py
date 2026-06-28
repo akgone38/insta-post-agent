@@ -43,106 +43,138 @@ to what's shown in the photo. Don't write generic captions — be specific to th
 
 Return ONLY the caption text (no extra explanation, no quotes around it)."""
 
-# HF Inference API endpoint (serverless)
-HF_API_BASE = "https://router.huggingface.co/hf-inference/models"
 
-# Vision models to try (in order of preference)
-VISION_MODELS = [
-    "Qwen/Qwen3-VL-8B-Instruct",
-    "CohereLabs/aya-vision-32b",
-]
+def _extract_first_frame(video_path: str) -> str:
+    """
+    Extract the first frame of a video using OpenCV and save it as a temp JPG.
+    
+    Returns the path to the temp JPG image.
+    """
+    import cv2
+    logger.info("Extracting first frame from video: %s", video_path)
+    vidcap = cv2.VideoCapture(video_path)
+    success, image = vidcap.read()
+    if not success:
+        vidcap.release()
+        raise RuntimeError(f"Could not read video frames from {video_path}")
+        
+    temp_jpg_path = video_path + ".frame0.jpg"
+    cv2.imwrite(temp_jpg_path, image)
+    vidcap.release()
+    logger.info("Successfully extracted first frame to: %s", temp_jpg_path)
+    return temp_jpg_path
 
 
 async def generate_caption(image_path: str, user_note: str | None = None) -> str:
     """
-    Generate an engaging Instagram caption by analyzing the image with Llama Vision.
+    Generate an engaging Instagram caption by analyzing the image (or video frame) with Llama Vision.
 
     Uses Hugging Face Inference API with multimodal models.
     Includes retry logic and fallback models.
 
     Args:
-        image_path: Path to the image file on disk.
+        image_path: Path to the image (or video) file on disk.
         user_note: Optional note/context from the user to incorporate.
 
     Returns:
         Generated caption string ready for Instagram.
     """
-    logger.info("Generating caption for image: %s", image_path)
+    logger.info("Generating caption for media: %s", image_path)
 
-    # Read image and encode as base64
-    image_data = Path(image_path).read_bytes()
-    mime_type = _get_mime_type(image_path)
-    image_b64 = base64.b64encode(image_data).decode("utf-8")
-    image_url = f"data:{mime_type};base64,{image_b64}"
+    # Check if media is a video
+    is_video = Path(image_path).suffix.lower() in [".mp4", ".mov", ".avi", ".mkv", ".3gp"]
+    temp_frame_path = None
+    
+    try:
+        if is_video:
+            temp_frame_path = _extract_first_frame(image_path)
+            model_image_path = temp_frame_path
+        else:
+            model_image_path = image_path
 
-    # Build user prompt
-    user_prompt = "Write an engaging Instagram caption for this image."
-    if user_note:
-        user_prompt += f"\n\nAdditional context from the user: {user_note}"
+        # Read image and encode as base64
+        image_data = Path(model_image_path).read_bytes()
+        mime_type = _get_mime_type(model_image_path)
+        image_b64 = base64.b64encode(image_data).decode("utf-8")
+        image_url = f"data:{mime_type};base64,{image_b64}"
 
-    # Build chat messages (OpenAI-compatible format used by HF)
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_url},
-                },
-                {
-                    "type": "text",
-                    "text": user_prompt,
-                },
-            ],
-        },
-    ]
+        # Build user prompt
+        user_prompt = "Write an engaging Instagram caption for this image."
+        if user_note:
+            user_prompt += f"\n\nAdditional context from the user: {user_note}"
 
-    last_error = None
+        # Build chat messages (OpenAI-compatible format used by HF)
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
+                    },
+                    {
+                        "type": "text",
+                        "text": user_prompt,
+                    },
+                ],
+            },
+        ]
 
-    for model_name in VISION_MODELS:
-        for attempt in range(3):
+        last_error = None
+
+        for model_name in settings.vision_models_list:
+            for attempt in range(3):
+                try:
+                    logger.info("Trying model: %s (attempt %d/3)", model_name, attempt + 1)
+
+                    caption = await _call_hf_inference(model_name, messages)
+
+                    logger.info(
+                        "Generated caption with %s (%d chars): %s...",
+                        model_name, len(caption), caption[:100],
+                    )
+                    return caption
+
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
+
+                    if "429" in error_str or "rate" in error_str.lower():
+                        wait_time = 10 * (attempt + 1)
+                        logger.warning(
+                            "Rate limited on %s (attempt %d). Waiting %ds...",
+                            model_name, attempt + 1, wait_time,
+                        )
+                        await asyncio.sleep(wait_time)
+                    elif "503" in error_str or "loading" in error_str.lower():
+                        wait_time = 20 * (attempt + 1)
+                        logger.warning(
+                            "Model %s is loading (attempt %d). Waiting %ds...",
+                            model_name, attempt + 1, wait_time,
+                        )
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error("Error with %s: %s", model_name, e)
+                        break  # Try next model
+
+            logger.warning("All retries exhausted for %s, trying next model...", model_name)
+
+        raise RuntimeError(f"Caption generation failed on all models: {last_error}")
+
+    finally:
+        # Clean up temp frame if it was created
+        if temp_frame_path and Path(temp_frame_path).exists():
             try:
-                logger.info("Trying model: %s (attempt %d/3)", model_name, attempt + 1)
-
-                caption = await _call_hf_inference(model_name, messages)
-
-                logger.info(
-                    "Generated caption with %s (%d chars): %s...",
-                    model_name, len(caption), caption[:100],
-                )
-                return caption
-
+                Path(temp_frame_path).unlink()
+                logger.info("Cleaned up temporary video frame: %s", temp_frame_path)
             except Exception as e:
-                last_error = e
-                error_str = str(e)
-
-                if "429" in error_str or "rate" in error_str.lower():
-                    wait_time = 10 * (attempt + 1)
-                    logger.warning(
-                        "Rate limited on %s (attempt %d). Waiting %ds...",
-                        model_name, attempt + 1, wait_time,
-                    )
-                    await asyncio.sleep(wait_time)
-                elif "503" in error_str or "loading" in error_str.lower():
-                    wait_time = 20 * (attempt + 1)
-                    logger.warning(
-                        "Model %s is loading (attempt %d). Waiting %ds...",
-                        model_name, attempt + 1, wait_time,
-                    )
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error("Error with %s: %s", model_name, e)
-                    break  # Try next model
-
-        logger.warning("All retries exhausted for %s, trying next model...", model_name)
-
-    raise RuntimeError(f"Caption generation failed on all models: {last_error}")
+                logger.warning("Could not delete temp video frame %s: %s", temp_frame_path, e)
 
 
 async def _call_hf_inference(model_name: str, messages: list) -> str:
     """Call HF Inference API using the router endpoint with chat completion format."""
-    url = "https://router.huggingface.co/v1/chat/completions"
+    url = f"{settings.huggingface_api_base}/chat/completions"
     headers = {
         "Authorization": f"Bearer {settings.huggingface_api_token}",
         "Content-Type": "application/json",

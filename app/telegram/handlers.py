@@ -9,8 +9,8 @@ from telegram.ext import ContextTypes
 
 from app.config import settings
 from app.ai.caption_gen import generate_caption
-from app.instagram.publisher import publish_photo, InstagramPublishError
-from app.facebook.publisher import publish_to_facebook, FacebookPublishError
+from app.instagram.publisher import publish_photo, publish_video, InstagramPublishError
+from app.facebook.publisher import publish_to_facebook, publish_video_to_facebook, FacebookPublishError
 
 logger = logging.getLogger(__name__)
 
@@ -51,94 +51,111 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handle incoming photos — the main pipeline.
+    Handle incoming photos and videos — the main pipeline.
 
     Flow:
-    1. Download the highest resolution photo from Telegram
-    2. Generate a caption using Gemini AI
-    3. Upload to Instagram via Graph API
-    4. Reply with status
+    1. Download the media (photo or video) from Telegram
+    2. Generate an engaging caption using Hugging Face (Llama Vision)
+    3. Upload concurrently to Instagram (Image or Reel) and Facebook (Photo or Video)
+    4. Reply with post links
     """
     message = update.message
     user = message.from_user
-    logger.info("Received photo from user %s (%s)", user.username, user.id)
+    
+    # Determine media type
+    is_video = bool(message.video)
+    media_name = "video" if is_video else "photo"
+    logger.info("Received %s from user %s (%s)", media_name, user.username, user.id)
 
     # Send "processing" status
     status_msg = await message.reply_text(
-        "⏳ *Processing your photo...*\n\n"
-        "🔍 Step 1/3: Downloading image...",
+        f"⏳ *Processing your {media_name}...*\n\n"
+        f"🔍 Step 1/3: Downloading {media_name}...",
         parse_mode="Markdown",
     )
 
     try:
-        # Step 1: Download the photo (highest resolution)
-        photo = message.photo[-1]  # Last element = highest resolution
-        user_caption = message.caption  # Optional caption from user
-
-        # Generate a unique filename
+        # Step 1: Download the file (highest resolution)
+        user_caption = message.caption
         file_id = str(uuid.uuid4())[:8]
-        image_filename = f"{file_id}.jpg"
-        image_path = TEMP_IMAGE_DIR / image_filename
+        
+        if is_video:
+            video = message.video
+            file_extension = Path(video.file_name or "video.mp4").suffix or ".mp4"
+            media_filename = f"{file_id}{file_extension}"
+            telegram_file_id = video.file_id
+        else:
+            photo = message.photo[-1]  # Highest resolution photo
+            media_filename = f"{file_id}.jpg"
+            telegram_file_id = photo.file_id
+
+        media_path = TEMP_IMAGE_DIR / media_filename
 
         # Download the file from Telegram
-        file = await context.bot.get_file(photo.file_id)
-        await file.download_to_drive(str(image_path))
-        logger.info("Downloaded photo to: %s", image_path)
+        file = await context.bot.get_file(telegram_file_id)
+        await file.download_to_drive(str(media_path))
+        logger.info("Downloaded %s to: %s", media_name, media_path)
 
         # Update status
         await status_msg.edit_text(
-            "⏳ *Processing your photo...*\n\n"
-            "✅ Step 1/3: Image downloaded\n"
+            f"⏳ *Processing your {media_name}...*\n\n"
+            f"✅ Step 1/3: {media_name.capitalize()} downloaded\n"
             "🤖 Step 2/3: Generating AI caption...",
             parse_mode="Markdown",
         )
 
-        # Step 2: Generate caption with Gemini
-        caption = await generate_caption(str(image_path), user_caption)
+        # Step 2: Generate caption using Hugging Face Llama Vision
+        caption = await generate_caption(str(media_path), user_caption)
         logger.info("Generated caption: %s", caption[:100])
 
         # Update status
         await status_msg.edit_text(
-            "⏳ *Processing your photo...*\n\n"
-            "✅ Step 1/3: Image downloaded\n"
+            f"⏳ *Processing your {media_name}...*\n\n"
+            f"✅ Step 1/3: {media_name.capitalize()} downloaded\n"
             "✅ Step 2/3: Caption generated\n"
             "📸 Step 3/3: Posting to Instagram & Facebook...",
             parse_mode="Markdown",
         )
 
         # Step 3: Post to platforms
-        # Instagram requires a public URL
-        public_image_url = f"{settings.image_serve_base_url}/{image_filename}"
-        logger.info("Public image URL: %s", public_image_url)
+        # Both platforms require a public URL
+        public_media_url = f"{settings.image_serve_base_url}/{media_filename}"
+        logger.info("Public media URL: %s", public_media_url)
 
-        # Run tasks (publish concurrently)
+        # Publish concurrently
         insta_success = False
         fb_success = False
         insta_link = None
         fb_link = None
         errors = []
 
-        # Try Instagram
+        # Try Instagram (Photo vs Reel)
         try:
-            insta_result = await publish_photo(public_image_url, caption)
+            if is_video:
+                insta_result = await publish_video(public_media_url, caption)
+            else:
+                insta_result = await publish_photo(public_media_url, caption)
             insta_success = True
             insta_link = insta_result.get("permalink")
         except Exception as e:
             logger.error("Instagram publish failed: %s", e)
             errors.append(f"Instagram: {e}")
 
-        # Try Facebook Page (URL upload)
+        # Try Facebook Page (Photo vs Video)
         try:
-            fb_result = await publish_to_facebook(public_image_url, caption)
+            if is_video:
+                fb_result = await publish_video_to_facebook(public_media_url, caption)
+            else:
+                fb_result = await publish_to_facebook(public_media_url, caption)
             fb_success = True
             fb_link = fb_result.get("permalink")
         except Exception as e:
             logger.error("Facebook publish failed: %s", e)
             errors.append(f"Facebook: {e}")
 
-        # Construct result message
+        # Construct final result message
         success_text = "🎉 *Publishing Complete!*\n\n"
         success_text += f"📝 *Caption:*\n{caption}\n\n"
         
@@ -162,7 +179,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.info("Publishing flow complete. Insta: %s, FB: %s", insta_success, fb_success)
 
     except Exception as e:
-        logger.error("Unexpected error in photo handler: %s", e, exc_info=True)
+        logger.error("Unexpected error in media handler: %s", e, exc_info=True)
         await status_msg.edit_text(
             f"❌ *Something went wrong:*\n\n`{e}`\n\n"
             "Please try again or check the server logs.",
